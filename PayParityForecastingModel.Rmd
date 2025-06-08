@@ -1,0 +1,150 @@
+---
+title: "Forecasting-Pay-Parity"
+output: html_document
+date: "2025-02-18"
+runtime: shiny
+---
+  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# --- Load Libraries ---
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(glmnet)
+library(randomForest)
+library(gridExtra)
+library(scales)
+library(tidyr)
+library(ggnewscale)
+library(patchwork)
+library(knitr)
+#Import libraries to support model validation
+library(dplyr)
+library(caret)
+```
+
+```{r}
+df_parity <- read_excel("C:/Pay-Parity-1991-2023.xlsx", sheet = 1) %>%
+ select(Year = 2, PayDisparity = 3) %>%
+ mutate(PayDisparity = as.numeric(PayDisparity))
+```
+
+```{r}
+data <- df_parity
+```
+
+#Scatterplot
+
+```{r}
+scatter.smooth(df_parity$PayDisparity,  , main = "Pay Disparity over Time")
+```
+
+#Boxplot
+
+```{r}
+boxplot(df_parity$PayDisparity)
+```
+
+#Build linear regression
+
+```{r}
+modelPD <- lm(df_parity$PayDisparity ~ df_parity$Year)
+summary(modelPD)
+predictions <- predict(modelPD, data)
+actuals <- df_parity$PayDisparity
+```
+
+#Find margin of error
+
+```{r}
+predictions <- modelPD %>% predict(data)
+
+data.frame(R_squared = R2(predictions, df_parity$PayDisparity),
+           RMSE = RMSE(predictions, df_parity$PayDisparity),
+           MAE = MAE(predictions, df_parity$PayDisparity))
+```
+
+#Create an 80/20 partition to train and test the model
+
+```{r}
+set.seed(123)
+training_obs <- createDataPartition(df_parity$PayDisparity, p = 0.8, list = FALSE)
+```
+
+#Build a training set
+
+```{r}
+train <- df_parity[1:28, ]
+```
+
+#Build a test set
+
+```{r}
+test <- df_parity[29:33, ]
+```
+
+#Summarize the data from the training set
+
+```{r}
+modelTrn <- lm(df_parity$PayDisparity ~  df_parity$Year, data = train)
+summary(modelTrn)
+```
+
+#Confirm first year of data
+
+```{r}
+min_year <- min(df_parity$Year)
+sprintf("First Year of Data: ")
+print(min_year)
+intercept <- coef(modelPD)[1]
+slope <- coef(modelPD)[2]
+```
+
+#Identify number of years from first year of data to achieve parity
+
+```{r}
+years_to_parity <- -intercept / slope + 1 - min_year
+sprintf("Number of Years to Achieve Pay Parity: ")
+print(years_to_parity)
+```
+
+#Identify the year that pay parity is achieved
+
+```{r}
+forecast_year <- min_year + years_to_parity
+sprintf("Calendar Year that Pay Parity is Achieved: ")
+print(forecast_year)
+```
+
+#Graph the data
+
+```{r}
+
+extended_years <- seq(min(df_parity$Year), forecast_year, by = 0.1)
+predicted_disparity <- intercept + slope * (extended_years - min(df_parity$Year))
+line_df <- data.frame(Year = extended_years, Predicted = predicted_disparity)
+
+show_forecast <- slope < 0
+
+parity_plot <- ggplot(df_parity, aes(x = Year, y = PayDisparity)) +
+ geom_point(color = "black", size = 3) +
+ geom_line(data = line_df, aes(x = Year, y = Predicted), color = "red", size = 1.2) +
+ {if (show_forecast) geom_vline(xintercept = forecast_year + 1, linetype = "dashed", color = "black", size = 1.2)} +
+ geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1.2) +
+ scale_x_continuous(limits = c(min(df_parity$Year), ceiling(forecast_year) + 1)) +
+ scale_y_continuous(limits = c(0, max(df_parity$PayDisparity, na.rm = TRUE))) +
+ labs(
+  title = "Forecast of Gender Pay Parity",
+  subtitle = if (show_forecast) paste("Estimated parity year:", round(forecast_year, 1)) else "No decreasing trend observed",
+  x = "Year",
+  y = "Gender Pay Disparity"
+ ) +
+ theme_minimal()
+print(parity_plot)
+```

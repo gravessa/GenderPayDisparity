@@ -1,0 +1,363 @@
+---
+title: "RegressionModel"
+output: html_document
+date: "2025-04-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list = ls())
+gc()
+
+# --- Load Libraries ---
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(glmnet)
+library(randomForest)
+library(gridExtra)
+library(scales)
+library(tidyr)
+library(ggnewscale)
+library(patchwork)
+library(knitr)
+library(forecast)
+library(gmodels)
+
+
+
+setwd("c:/Users/saman/OneDrive/Desktop/Praxis-Data2")
+```
+# --- Load and Clean Main Dataset ---
+```{r}
+df <- read_excel("Salary-2014-2023.xlsx", sheet = "Transformed-Data") %>%
+ na.omit()
+df$Gender <- as.factor(df$Gender)
+```
+
+# Remove salary outliers using IQR
+```{r}
+Q1 <- quantile(df$Salary, 0.25)
+Q3 <- quantile(df$Salary, 0.75)
+IQR <- Q3 - Q1
+df <- df %>% filter(Salary >= (Q1 - 1.5 * IQR) & Salary <= (Q3 + 1.5 * IQR))
+summary(df)
+```
+
+# --- Split Data ---
+```{r}
+set.seed(123)
+trainIndex <- createDataPartition(df$Salary, p = 0.8, list = FALSE)
+train <- df[trainIndex, ]
+test <- df[-trainIndex, ]
+```
+
+# --- Model Training ---
+# 1. Linear Model
+```{r}
+model_linear <- lm(Salary ~ Age + Education + Gender + Year, data = train)
+summary(model_linear)
+```
+
+# 2. Polynomial Model
+```{r}
+model_poly <- lm(Salary ~ poly(Age, 2) + poly(Education, 2) + Gender + Year, data = train)
+summary(model_poly)
+```
+
+# 3. Polynomial with Interactions Model
+```{r}
+model_interact <- lm(Salary ~ (poly(Age, 2) + poly(Education, 2) + Education:Age + Education:Gender + Gender:Age + Year), data = train)
+summary(model_interact)
+```
+```{r}
+x_poly <- stats:::predict.poly(object = poly(df$Age,2), newdata = 3)
+
+coef(model_interact)[1] +coef(model_interact)[2]*x_poly[1]
+```
+
+
+```{r}
+predictions <- model_interact %>% predict(test)
+
+data.frame(R_squared = R2(predictions, test$Salary),
+           RMSE = RMSE(predictions, test$Salary),
+           MAE = MAE(predictions, test$Salary))
+```
+
+
+```{r}
+vif_results <-car::vif(model_interact)
+print(vif_results)
+```
+
+```{r}
+vif_results <-car::vif(model_interact, type =c("predictor"))
+print(vif_results)
+```
+```{r}
+ggplot(df, aes(x = as.numeric(Year), y = Salary, color = Gender)) + 
+  geom_point() +
+  geom_smooth(method = lm, aes(linetype = Gender))
+```
+
+
+# 4. LASSO MODEL
+#Develop training and test set
+```{r}
+x_train <- model.matrix(Salary ~ (Age + I(Age^2) + Education + I(Education^2) + Gender + Education:Year), train)[, -1]
+y_train <- train$Salary
+x_test <- model.matrix(Salary ~ (Age + I(Age^2) + Education + I(Education^2) + Gender + Education:Year), test)[, -1]
+y_test <- test$Salary
+
+lasso_model <- cv.glmnet(x_train, y_train, alpha = 1)
+lasso_pred <- predict(lasso_model, s = "lambda.min", newx = x_test)
+coef(lasso_model)
+```
+```{r}
+#Professor code
+###x_train <- model.matrix(Salary ~ (Age + I(Age^2) + Education + I(Education^2) + Gender)^2, train)[, -1]
+#y_train <- train$Salary
+#x_test <- model.matrix(Salary ~ (Age + I(Age^2) + Education + I(Education^2) + Gender)^2, test)[, -1]
+#y_test <- test$Salary
+#lasso_model <- cv.glmnet(x_train, y_train, alpha = 1)
+#lasso_pred <- predict(lasso_model, s = "lambda.min", newx = x_test)
+###coef(lasso_model)
+```
+
+# 5. RANDOM FOREST
+```{r}
+rf_model <- randomForest(Salary ~ Age + Education + Gender + Year, data = train)
+rf_pred <- predict(rf_model, newdata = test)
+```
+
+```{r}
+summary(test)
+summary(train)
+```
+
+```{r}
+# --- Model Performance Evaluation ---
+r2 <- function(actual, pred) 1 - sum((actual - pred)^2) / sum((actual - mean(actual))^2)
+rmse <- function(actual, pred) sqrt(mean((actual - pred)^2))
+
+pred_list <- list(
+ Linear = predict(model_linear, newdata = test),
+ Polynomial = predict(model_poly, newdata = test),
+ `Poly + Interactions` = predict(model_interact, newdata = test),
+ LASSO = as.numeric(lasso_pred),
+ `Random Forest` = rf_pred
+)
+
+performance <- data.frame(
+ Model = names(pred_list),
+ R2 = sapply(pred_list, function(p) r2(y_test, p)),
+ RMSE = sapply(pred_list, function(p) rmse(y_test, p))
+)
+performance$Label <- paste0("R2 = ", round(performance$R2, 3), "\nRMSE = ", round(performance$RMSE, 1))
+print(knitr::kable(
+ performance %>% select(Model, R2, RMSE),
+ digits = 3,
+ align = 'c',
+ caption = "Model Performance Summary",
+ row.names = FALSE))
+```
+
+# --- Generate Model Fit Plots ---
+```{r}
+model_colors <- c(
+ "Linear Regression" = "darkgreen",
+ "Polynomial Regression" = "blue",
+ "Poly + Interactions" = "purple",
+ "LASSO" = "orange",
+ "Random Forest" = "red"
+)
+
+plot_df <- df %>% mutate(GenderNum = as.numeric(as.character(Gender)))
+
+
+generate_predictions <- function(var, color_by) {
+ grid <- expand.grid(
+  Age = if (var == "Age") seq(min(df$Age), max(df$Age), length.out = 100) else median(df$Age),
+  Education = if (var == "Education") seq(min(df$Education), max(df$Education), length.out = 100) else median(df$Education),
+  Year = if (var == "Year") seq(min(df$Year), max(df$Year), length.out = 100) else median(df$Year),
+  Gender = factor(median(as.numeric(as.character(df$Gender))), levels = c(0, 1))
+ )
+ grid$Gender <- factor(grid$Gender, levels = levels(df$Gender))
+ grid$Linear <- predict(model_linear, newdata = grid)
+ grid$Poly <- predict(model_poly, newdata = grid)
+ grid$PolyInt <- predict(model_interact, newdata = grid)
+ x_grid <- model.matrix(~ (Age + I(Age^2) + Education + I(Education^2) + Gender + Year)^2, grid)[, -1]
+ grid$Lasso <- as.numeric(predict(lasso_model, s = "lambda.min", newx = x_grid))
+ grid$RF <- predict(rf_model, newdata = grid)
+ return(grid)
+}
+
+plot_model_fits <- function(var, color_by, title, xlab) {
+ grid <- generate_predictions(var, color_by)
+ grid_long <- grid %>% pivot_longer(cols = c("Linear", "Poly", "PolyInt", "Lasso", "RF"), names_to = "Model", values_to = "Predicted")
+ grid_long$Model <- factor(grid_long$Model, levels = c("Linear", "Poly", "PolyInt", "Lasso", "RF"),
+                           labels = c("Linear Regression", "Polynomial Regression", "Poly + Interactions", "LASSO", "Random Forest"))
+ if (color_by == "Gender") {
+  df[[color_by]] <- factor(df[[color_by]], levels = c(0, 1), labels = c("Male", "Female"))
+ }
+ p <- ggplot() +
+  geom_point(data = df, aes_string(x = var, y = "Salary", color = color_by), alpha = 0.5) +
+  {
+   if (color_by == "Gender") {
+    scale_color_manual(values = c("Female" = "blue", "Male" = "red"))
+   } else {
+    scale_color_gradient(low = "blue", high = "red")
+   }
+  } +
+  ggnewscale::new_scale_color() +
+  geom_line(data = grid_long, aes_string(x = var, y = "Predicted", color = "Model"), size = 1) +
+  scale_color_manual(name = "Model Fits", values = model_colors, guide = guide_legend(override.aes = list(size = 1.5))) +
+  labs(title = title, x = xlab, y = "Salary") +
+  theme_minimal()
+ return(p)
+}
+```
+
+# --- Generate Predicted vs Actual Plots ---
+```{r}
+df_list <- list(
+ Linear = data.frame(Actual = y_test, Predicted = pred_list$Linear),
+ Polynomial = data.frame(Actual = y_test, Predicted = pred_list$Polynomial),
+ `Poly + Interactions` = data.frame(Actual = y_test, Predicted = pred_list$`Poly + Interactions`),
+ LASSO = data.frame(Actual = y_test, Predicted = pred_list$LASSO),
+ `Random Forest` = data.frame(Actual = y_test, Predicted = pred_list$`Random Forest`)
+)
+
+k_format <- scales::label_number(scale = 1e-3, suffix = "K")
+y_min <- min(sapply(df_list, function(d) min(d$Predicted)))
+y_max <- max(sapply(df_list, function(d) max(d$Predicted)))
+x_min <- min(sapply(df_list, function(d) min(d$Actual)))
+x_max <- max(sapply(df_list, function(d) max(d$Actual)))
+```
+
+# --- Graph Data ---
+```{r}
+plot_actual_vs_pred <- function(name) {
+ ggplot(df_list[[name]], aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(color = "red") +
+  ggtitle(paste(name, "Model")) +
+  annotate("text", x = x_min, y = y_max, label = performance$Label[performance$Model == name], hjust = 0, vjust = 1) +
+  scale_y_continuous(labels = k_format, limits = c(y_min, y_max)) +
+  scale_x_continuous(labels = k_format, limits = c(x_min, x_max))
+}
+
+plot1 <- plot_actual_vs_pred("Linear")
+plot2 <- plot_actual_vs_pred("Polynomial")
+plot3 <- plot_actual_vs_pred("Poly + Interactions")
+plot4 <- plot_actual_vs_pred("LASSO")
+plot5 <- plot_actual_vs_pred("Random Forest")
+
+print(plot1)
+print(plot2)
+print(plot3)
+print(plot4)
+print(plot5)
+```
+
+```{r}
+cor_test_sal <- cor.test(df$Salary, as.numeric(df$Gender))
+print(cor_test_sal)
+```
+
+
+```{r}
+cor_sal <- cor(as.numeric(df$Salary), as.numeric(df$Gender))
+print(cor_sal)
+```
+
+
+```{r}
+cor_sal2 <- cor(as.numeric(df$Salary), as.numeric(df$Education))
+print(cor_sal2)
+```
+
+
+```{r}
+cor_sal3 <- cor(as.numeric(df$Salary), as.numeric(df$Age))
+print(cor_sal3)
+```
+
+
+
+```{r}
+cor_ed <- cor(as.numeric(df$Education), as.numeric(df$Gender))
+print(cor_ed)
+```
+
+
+```{r}
+cor_ed2 <- cor(as.numeric(df$Education), as.numeric(df$Age))
+print(cor_ed2)
+```
+
+
+```{r}
+cor_age <- cor(as.numeric(df$Age), as.numeric(df$Gender))
+print(cor_age)
+```
+
+```{r}
+cor_test_sal <- cor.test(df$Salary, as.numeric(df$Gender))
+print(cor_test_sal)
+```
+
+
+```{r}
+cor_sal <- cor(as.numeric(df$Salary), as.numeric(df$Gender))
+print(cor_sal)
+```
+
+
+```{r}
+cor_sal2 <- cor(as.numeric(df$Salary), as.numeric(df$Education))
+print(cor_sal2)
+```
+
+
+```{r}
+cor_sal3 <- cor(as.numeric(df$Salary), as.numeric(df$Age))
+print(cor_sal3)
+```
+
+
+```{r}
+cor_sal4 <- cor(as.numeric(df$Salary), as.numeric(df$Gender))
+print(cor_sal4)
+```
+
+
+```{r}
+cor_ed <- cor(as.numeric(df$Education), as.numeric(df$Gender))
+print(cor_ed)
+```
+
+
+```{r}
+cor_ed2 <- cor(as.numeric(df$Education), as.numeric(df$Age))
+print(cor_ed2)
+```
+
+
+```{r}
+cor_age <- cor(as.numeric(df$Age), as.numeric(df$Gender))
+print(cor_age)
+```
+
+
+
+
+
+
+
+
